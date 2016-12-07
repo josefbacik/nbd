@@ -1498,7 +1498,7 @@ CLIENT* negotiate(int net, GArray* servers) {
 
 void send_export_info(CLIENT* client) {
 	uint64_t size_host = htonll((u64)(client->exportsize));
-	uint16_t flags = NBD_FLAG_HAS_FLAGS;
+	uint16_t flags = NBD_FLAG_HAS_FLAGS | NBD_FLAG_CAN_MULTI_CONN;
 
 	if (write(client->net, &size_host, 8) < 0)
 		err("Negotiation failed/9: %m");

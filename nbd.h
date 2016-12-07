@@ -48,6 +48,7 @@ enum {
 #define NBD_FLAG_SEND_FUA	(1 << 3)	/* Send FUA (Force Unit Access) */
 #define NBD_FLAG_ROTATIONAL	(1 << 4)	/* Use elevator algorithm - rotational media */
 #define NBD_FLAG_SEND_TRIM	(1 << 5)	/* Send TRIM (discard) */
+#define NBD_FLAG_CAN_MULTI_CONN	(1 << 8)	/* Server supports multiple connections per export. */
 
 #define nbd_cmd(req) ((req)->cmd[0])
 
