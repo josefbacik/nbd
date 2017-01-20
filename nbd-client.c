@@ -43,6 +43,7 @@
 #include <stdbool.h>
 #include <time.h>
 
+#include <linux/limits.h>
 #include <linux/ioctl.h>
 #define MY_NAME "nbd_client"
 #include "cliserv.h"
@@ -720,6 +721,26 @@ int main(int argc, char *argv[]) {
 					usage("no valid configuration for specified device found", hostname);
 					exit(EXIT_FAILURE);
 				}
+			} else if (!nbddev) {
+				int fd = open("/dev/nbd-control", O_RDWR);
+				int devnum;
+				if (fd < 0) {
+					usage("no valid nbd device specified");
+					exit(EXIT_FAILURE);
+				}
+				devnum = ioctl(fd, NBD_CTL_GET_FREE, NBD_CTL_GET_FREE_ADD);
+				if (devnum < 0) {
+					usage("Could not find a free nbd device");
+					exit(EXIT_FAILURE);
+				}
+				nbddev = malloc(PATH_MAX);
+				if (!nbddev) {
+					usage("Couldn't allocate a nbd device buffer");
+					exit(EXIT_FAILURE);
+				}
+				snprintf(nbddev, PATH_MAX, "/dev/nbd%d", devnum);
+				printf("Attaching to device %s\n", nbddev);
+				close(fd);
 			} else {
 				usage("not enough information specified, and argument didn't look like an nbd device");
 				exit(EXIT_FAILURE);

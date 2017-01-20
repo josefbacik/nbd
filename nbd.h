@@ -29,6 +29,16 @@
 #define NBD_SET_TIMEOUT _IO( 0xab, 9 )
 #define NBD_SET_FLAGS _IO( 0xab, 10 )
 
+/* Use the last 8 values of our allocation for CTRL ioctls. */
+#define NBD_CTL_ADD		_IO( 0xab, 23)
+#define NBD_CTL_GET_FREE	_IO( 0xab, 24)
+
+enum {
+	NBD_CTL_GET_FREE_SCAN = 0, /* Get the next free available device. */
+	NBD_CTL_GET_FREE_ADD = 1, /* Get the next free available device, but
+				     create one if one does not exist. */
+};
+
 enum {
 	NBD_CMD_READ = 0,
 	NBD_CMD_WRITE = 1,
