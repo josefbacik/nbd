@@ -60,6 +60,7 @@ enum {
 #define NBD_FLAG_SEND_TRIM	(1 << 5)	/* Send TRIM (discard) */
 #define NBD_FLAG_CAN_MULTI_CONN	(1 << 8)	/* Server supports multiple connections per export. */
 
+#define NBD_FLAG_CAN_RECONNECT	(1 << 20)
 #define nbd_cmd(req) ((req)->cmd[0])
 
 /* userspace doesn't need the nbd_device structure */

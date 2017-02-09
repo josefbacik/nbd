@@ -87,11 +87,12 @@ int check_conn(char* devname, int do_print) {
 	return 0;
 }
 
-int opennet(char *name, char* portstr, int sdp) {
+int opennet(char *name, char* portstr, int sdp, int reconn) {
 	int sock;
 	struct addrinfo hints;
 	struct addrinfo *ai = NULL;
 	struct addrinfo *rp = NULL;
+	int retries = 0;
 	int e;
 
 	memset(&hints,'\0',sizeof(hints));
@@ -119,18 +120,21 @@ int opennet(char *name, char* portstr, int sdp) {
 #endif
 	}
 
-	for(rp = ai; rp != NULL; rp = rp->ai_next) {
-		sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+	do {
+		for(rp = ai; rp != NULL; rp = rp->ai_next) {
+			sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 
-		if(sock == -1)
-			continue;	/* error */
+			if(sock == -1)
+				continue;	/* error */
 
-		if(connect(sock, rp->ai_addr, rp->ai_addrlen) != -1)
-			break;		/* success */
-			
-		close(sock);
-	}
+			if(connect(sock, rp->ai_addr, rp->ai_addrlen) != -1)
+				goto gotit;
 
+			close(sock);
+		}
+		sleep(5);
+	} while (reconn && retries++ < 5);
+gotit:
 	if (rp == NULL) {
 		err_nonfatal("Socket failed: %m");
 		sock = -1;
@@ -489,7 +493,7 @@ void setsizes(int nbd, u64 size64, int blocksize, u32 flags) {
 	ioctl(nbd, NBD_CLEAR_SOCK);
 
 	/* ignore error as kernel may not support */
-	ioctl(nbd, NBD_SET_FLAGS, (unsigned long) flags);
+	ioctl(nbd, NBD_SET_FLAGS, (unsigned long) flags | NBD_FLAG_CAN_RECONNECT);
 
 	if (ioctl(nbd, BLKROSET, (unsigned long) &read_only) < 0)
 		err("Unable to set read-only attribute for device");
@@ -595,6 +599,7 @@ int main(int argc, char *argv[]) {
 	sigset_t block, old;
 	struct sigaction sa;
 	int num_connections = 1;
+	int reconn = 0;
 	struct option long_options[] = {
 		{ "block-size", required_argument, NULL, 'b' },
 		{ "check", required_argument, NULL, 'c' },
@@ -758,17 +763,20 @@ int main(int argc, char *argv[]) {
 	nbd = open(nbddev, O_RDWR);
 	if (nbd < 0)
 	  err("Cannot open NBD: %m\nPlease ensure the 'nbd' module is loaded.");
-
+reconnect:
 	for (i = 0; i < num_connections; i++) {
 		if (b_unix)
 			sock = openunix(hostname);
 		else
-			sock = opennet(hostname, port, sdp);
-		if (sock < 0)
+			sock = opennet(hostname, port, sdp, reconn);
+		if (sock < 0) {
+//			if (reconn)
+//				goto out;
 			exit(EXIT_FAILURE);
+		}
 
 		negotiate(sock, &size64, &flags, name, needed_flags, cflags, opts);
-		if (i == 0) {
+		if (i == 0 && !reconn) {
 			setsizes(nbd, size64, blocksize, flags);
 			set_timeout(nbd, timeout);
 		}
@@ -782,11 +790,13 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+	if (reconn)
+		goto doit;
 	/* Go daemon */
 	
 #ifndef NOFORK
 	if(!nofork) {
-		if (daemon(0,0) < 0)
+		if (daemon(0,1) < 0)
 			err("Cannot detach from terminal");
 	}
 
@@ -797,6 +807,7 @@ int main(int argc, char *argv[]) {
 	/* For child to check its parent */
 	main_pid = getpid();
 	do {
+		int foo;
 #ifndef NOFORK
 
 		sigfillset(&block);
@@ -835,8 +846,10 @@ int main(int argc, char *argv[]) {
 			exit(0);
 		}
 #endif
-
-		if (ioctl(nbd, NBD_DO_IT) < 0) {
+doit:
+		foo = ioctl(nbd, NBD_DO_IT);
+		printf("GOT %d FROM DO_IT\n", foo);
+		if (foo < 0) {
 			int error = errno;
 			fprintf(stderr, "nbd,%d: Kernel call returned: %d", main_pid, error);
 			if(error==EBADR) {
@@ -844,34 +857,9 @@ int main(int argc, char *argv[]) {
 				 * quit */
 				cont=0;
 			} else {
-				if(cont) {
-					u64 new_size;
-					uint16_t new_flags;
-
-					close(sock); close(nbd);
-					for (;;) {
-						fprintf(stderr, " Reconnecting\n");
-						if (b_unix)
-							sock = openunix(hostname);
-						else
-							sock = opennet(hostname, port, sdp);
-						if (sock >= 0)
-							break;
-						sleep (1);
-					}
-					nbd = open(nbddev, O_RDWR);
-					if (nbd < 0)
-						err("Cannot open NBD: %m");
-					negotiate(sock, &new_size, &new_flags, name, needed_flags, cflags, opts);
-					if (size64 != new_size) {
-						err("Size of the device changed. Bye");
-					}
-					setsizes(nbd, size64, blocksize,
-								new_flags);
-
-					set_timeout(nbd, timeout);
-					finish_sock(sock,nbd,swap);
-				}
+				printf("trying reconnect\n");
+				reconn = 1;
+				goto reconnect;
 			}
 		} else {
 			/* We're on 2.4. It's not clearly defined what exactly
@@ -881,6 +869,7 @@ int main(int argc, char *argv[]) {
 			cont=0;
 		}
 	} while(cont);
+out:
 	printf("sock, ");
 	ioctl(nbd, NBD_CLEAR_SOCK);
 	printf("done\n");
