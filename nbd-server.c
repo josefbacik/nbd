@@ -663,6 +663,7 @@ GArray* parse_cfile(gchar* f, struct generic_conf *const genconf, bool expect_ge
 		{ "listenaddr", FALSE,  PARAM_STRING,   &(s.listenaddr),	0 },
 		{ "maxconnections", FALSE, PARAM_INT,	&(s.max_connections),	0 },
 		{ "splice",	FALSE,	PARAM_BOOL,	&(s.flags),		F_SPLICE},
+		{ "failtime",	FALSE,	PARAM_INT,	&(s.failtime),		0 },
 	};
 	const int lp_size=sizeof(lp)/sizeof(PARAM);
         struct generic_conf genconftmp;
@@ -1767,6 +1768,11 @@ end:
 static int mainloop_threaded(CLIENT* client) {
 	struct nbd_request* req;
 	struct work_package* pkg;
+	SERVER *server = client->server;
+	struct timespec start;
+	bool fail = false;
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
 	send_export_info(client);
 	DEBUG("Entering request loop\n");
@@ -1778,6 +1784,23 @@ static int mainloop_threaded(CLIENT* client) {
 			writeit(client->transactionlogfd, req, sizeof(struct nbd_request));
 		}
 
+		if (!fail && server->failtime) {
+			struct timespec end;
+			clock_gettime(CLOCK_MONOTONIC, &end);
+
+			/* Just in case time goes backwards. */
+			if (end.tv_sec < start.tv_sec) {
+				start = end;
+			} else {
+				if (server->failtime <=
+				    (end.tv_sec - start.tv_sec))
+					fail = true;
+			}
+		}
+		if (fail) {
+			free(req);
+			continue;
+		}
 		req->from = ntohll(req->from);
 		req->type = ntohl(req->type);
 		req->len = ntohl(req->len);
