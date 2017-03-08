@@ -61,7 +61,24 @@
 
 #define NBDC_DO_LIST 1
 
+static int opennet(char *name, char* portstr, int sdp);
+static int openunix(const char *path);
+static void negotiate(int sock, u64 *rsize64, uint16_t *flags, char* name,
+		      uint32_t needed_flags, uint32_t client_flags,
+		      uint32_t do_opts);
 #ifdef HAVE_NETLINK
+static int netlink_index;
+
+struct host_info {
+	char *hostname;
+	char *name;
+	char *port;
+	int sdp;
+	int b_unix;
+	int driver_id;
+	struct nl_sock *socket;
+};
+
 static int callback(struct nl_msg *msg, void *arg) {
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct nlattr *msg_attr[NBD_ATTR_MAX + 1];
@@ -75,12 +92,14 @@ static int callback(struct nl_msg *msg, void *arg) {
 	if (!msg_attr[NBD_ATTR_INDEX])
 		err("Did not receive index from the kernel\n");
 	index = nla_get_u32(msg_attr[NBD_ATTR_INDEX]);
+	netlink_index = index;
 	printf("Connected /dev/nbd%d\n", (int)index);
 	return NL_OK;
 }
 
 static struct nl_sock *get_nbd_socket(int *driver_id) {
 	struct nl_sock *socket;
+	int id;
 
 	socket = nl_socket_alloc();
 	if (!socket)
@@ -88,9 +107,11 @@ static struct nl_sock *get_nbd_socket(int *driver_id) {
 
 	if (genl_connect(socket))
 		err("Couldn't connect to the generic netlink socket\n");
-	*driver_id = genl_ctrl_resolve(socket, "nbd");
-	if (*driver_id < 0)
+	id = genl_ctrl_resolve(socket, "nbd");
+	if (id < 0)
 		err("Couldn't resolve the nbd netlink family, make sure the nbd module is loaded and your nbd driver supports the netlink interface.\n");
+	if (driver_id)
+		*driver_id = id;
 	return socket;
 }
 
@@ -166,6 +187,83 @@ static void netlink_disconnect(char *nbddev) {
 nla_put_failure:
 	err("Failed to create netlink message\n");
 }
+
+static int mcast_callback(struct nl_msg *msg, void *arg)
+{
+	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+	struct nlattr *msg_attr[NBD_ATTR_MAX + 1];
+	struct host_info *hinfo = (struct host_info *)arg;
+	struct nlattr *sock_attr;
+	struct nlattr *sock_opt;
+	struct nl_msg *out_msg;
+	uint32_t cflags = NBD_FLAG_C_FIXED_NEWSTYLE;
+	uint16_t flags = 0;
+	u64 size64 = 0;
+	int ret;
+	uint32_t index;
+	int socket;
+
+	if (gnlh->cmd != NBD_CMD_LINK_DEAD)
+		return NL_SKIP;
+	ret = nla_parse(msg_attr, NBD_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+			genlmsg_attrlen(gnlh, 0), NULL);
+	if (ret) {
+		fprintf(stderr, "Invalid message from th kernel\n");
+		return NL_SKIP;
+	}
+	if (!msg_attr[NBD_ATTR_INDEX]) {
+		fprintf(stderr, "Don't have the index set\n");
+		return NL_SKIP;
+	}
+	index = nla_get_u32(msg_attr[NBD_ATTR_INDEX]);
+
+	printf("disconnect on index %d\n", index);
+	if (hinfo->b_unix)
+		socket = openunix(hinfo->hostname);
+	else
+		socket = opennet(hinfo->hostname, hinfo->port, hinfo->sdp);
+	negotiate(socket, &size64, &flags, hinfo->name, 0, cflags, 0);
+	out_msg = nlmsg_alloc();
+	if (!out_msg)
+		err("Couldn't allocate netlink message\n");
+	genlmsg_put(out_msg, NL_AUTO_PORT, NL_AUTO_SEQ, hinfo->driver_id, 0, 0,
+		    NBD_CMD_RECONFIGURE, 0);
+	NLA_PUT_U32(out_msg, NBD_ATTR_INDEX, index);
+	sock_attr = nla_nest_start(out_msg, NBD_ATTR_SOCKETS);
+	if (!sock_attr)
+		err("Couldn't nest the sockets for our connection\n");
+	sock_opt = nla_nest_start(out_msg, NBD_SOCK_ITEM);
+	if (!sock_opt)
+		err("Couldn't nest the sockets for our connection\n");
+	NLA_PUT_U32(out_msg, NBD_SOCK_FD, socket);
+	nla_nest_end(out_msg, sock_opt);
+	nla_nest_end(out_msg, sock_attr);
+	if (nl_send_sync(hinfo->socket, out_msg) < 0)
+		err("Couldn't reconnect device\n");
+	close(socket);
+	return NL_OK;
+nla_put_failure:
+	err("Couldn't create the netlink message\n");
+}
+
+static void netlink_monitor(struct host_info *hinfo)
+{
+	struct nl_sock *sock = get_nbd_socket(NULL);
+	struct nl_sock *tx_sock = get_nbd_socket(&hinfo->driver_id);
+	int mcast_grp;
+
+	mcast_grp = genl_ctrl_resolve_grp(sock, NBD_GENL_FAMILY_NAME,
+					  NBD_GENL_MCAST_GROUP_NAME);
+	if (mcast_grp < 0)
+		err("Couldn't find the nbd multicast group\n");
+
+	hinfo->socket = tx_sock;
+	nl_socket_disable_seq_check(sock);
+	nl_socket_modify_cb(sock, NL_CB_VALID, NL_CB_CUSTOM, mcast_callback, hinfo);
+	nl_socket_add_memberships(sock, mcast_grp, 0);
+	while (1)
+		nl_recvmsgs_default(sock);
+}
 #else
 static void netlink_configure(int index, int *sockfds, int num_connects,
 			      u64 size64, int blocksize, uint16_t flags,
@@ -178,7 +276,7 @@ static void netlink_disconnect(char *nbddev)
 }
 #endif /* HAVE_NETLINK */
 
-int check_conn(char* devname, int do_print) {
+static int check_conn(char* devname, int do_print) {
 	char buf[256];
 	char* p;
 	int fd;
@@ -211,7 +309,7 @@ int check_conn(char* devname, int do_print) {
 	return 0;
 }
 
-int opennet(char *name, char* portstr, int sdp) {
+static int opennet(char *name, char* portstr, int sdp) {
 	int sock;
 	struct addrinfo hints;
 	struct addrinfo *ai = NULL;
@@ -267,7 +365,7 @@ err:
 	return sock;
 }
 
-int openunix(const char *path) {
+static int openunix(const char *path) {
 	int sock;
 	struct sockaddr_un un_addr;
 	memset(&un_addr, 0, sizeof(un_addr));
@@ -293,7 +391,7 @@ int openunix(const char *path) {
 	return sock;
 }
 
-void ask_list(int sock) {
+static void ask_list(int sock) {
 	uint32_t opt;
 	uint32_t opt_server;
 	uint32_t len;
@@ -391,7 +489,10 @@ void ask_list(int sock) {
 		err("Failed writing length");
 }
 
-void negotiate(int sock, u64 *rsize64, uint16_t *flags, char* name, uint32_t needed_flags, uint32_t client_flags, uint32_t do_opts) {
+static void negotiate(int sock, u64 *rsize64, uint16_t *flags, char* name,
+		      uint32_t needed_flags, uint32_t client_flags,
+		      uint32_t do_opts)
+{
 	u64 magic, size64;
 	uint16_t tmp;
 	uint16_t global_flags;
@@ -469,7 +570,10 @@ void negotiate(int sock, u64 *rsize64, uint16_t *flags, char* name, uint32_t nee
 	*rsize64 = size64;
 }
 
-bool get_from_config(char* cfgname, char** name_ptr, char** dev_ptr, char** hostn_ptr, int* bs, int* timeout, int* persist, int* swap, int* sdp, int* b_unix, char**port) {
+static bool get_from_config(char* cfgname, char** name_ptr, char** dev_ptr,
+			    char** hostn_ptr, int* bs, int* timeout,
+			    int* persist, int* swap, int* sdp, int* b_unix,
+			    char**port) {
 	int fd = open(SYSCONFDIR "/nbdtab", O_RDONLY);
 	bool retval = false;
 	if(fd < 0) {
@@ -582,7 +686,7 @@ out:
 	return retval;
 }
 
-void setsizes(int nbd, u64 size64, int blocksize, u32 flags) {
+static void setsizes(int nbd, u64 size64, int blocksize, u32 flags) {
 	unsigned long size;
 	int read_only = (flags & NBD_FLAG_READ_ONLY) ? 1 : 0;
 
@@ -619,7 +723,7 @@ void setsizes(int nbd, u64 size64, int blocksize, u32 flags) {
 		err("Unable to set read-only attribute for device");
 }
 
-void set_timeout(int nbd, int timeout) {
+static void set_timeout(int nbd, int timeout) {
 	if (timeout) {
 		if (ioctl(nbd, NBD_SET_TIMEOUT, (unsigned long)timeout) < 0)
 			err("Ioctl NBD_SET_TIMEOUT failed: %m\n");
@@ -627,7 +731,7 @@ void set_timeout(int nbd, int timeout) {
 	}
 }
 
-void finish_sock(int sock, int nbd, int swap) {
+static void finish_sock(int sock, int nbd, int swap) {
 	if (ioctl(nbd, NBD_SET_SOCK, sock) < 0) {
 		if (errno == EBUSY)
 			err("Kernel doesn't support multiple connections\n");
@@ -656,7 +760,7 @@ oom_adjust(const char *file, const char *value)
 	return rc ? -1 : 0;
 }
 
-void usage(char* errmsg, ...) {
+static void usage(char* errmsg, ...) {
 	if(errmsg) {
 		char tmp[256];
 		va_list ap;
@@ -685,7 +789,7 @@ void usage(char* errmsg, ...) {
 	fprintf(stderr, "Default value for port is 10809. Note that port must always be numeric\n");
 }
 
-void disconnect(char* device) {
+static void disconnect(char* device) {
 	int nbd = open(device, O_RDWR);
 
 	if (nbd < 0)
@@ -700,7 +804,7 @@ void disconnect(char* device) {
 }
 
 #ifdef HAVE_NETLINK
-static const char *short_opts = "-b:c:C:d:hlLnN:pSst:u";
+static const char *short_opts = "-b:c:C:d:hlLMnN:pSst:u";
 #else
 static const char *short_opts = "-b:c:C:d:hlnN:pSst:u";
 #endif
@@ -713,7 +817,7 @@ int main(int argc, char *argv[]) {
 	char *nbddev=NULL;
 	int swap=0;
 	int cont=0;
-	int timeout=0;
+	int timeout=30;
 	int sdp=0;
 	int G_GNUC_UNUSED nofork=0; // if -dNOFORK
 	pid_t main_pid;
@@ -730,6 +834,7 @@ int main(int argc, char *argv[]) {
 	struct sigaction sa;
 	int num_connections = 1;
 	int netlink = 0;
+	int monitor = 0;
 	int need_disconnect = 0;
 	int *sockfds;
 	struct option long_options[] = {
@@ -739,6 +844,7 @@ int main(int argc, char *argv[]) {
 		{ "disconnect", required_argument, NULL, 'd' },
 		{ "help", no_argument, NULL, 'h' },
 		{ "list", no_argument, NULL, 'l' },
+		{ "monitor", no_argument, NULL, 'M'},
 		{ "name", required_argument, NULL, 'N' },
 #ifdef HAVE_NETLINK
 		{ "netlink", no_argument, NULL, 'L' },
@@ -822,6 +928,10 @@ int main(int argc, char *argv[]) {
 			break;
 #ifdef HAVE_NETLINK
 		case 'L':
+			netlink = 1;
+			break;
+		case 'M':
+			monitor = 1;
 			netlink = 1;
 			break;
 #endif
@@ -939,6 +1049,17 @@ int main(int argc, char *argv[]) {
 		}
 		netlink_configure(index, sockfds, num_connections,
 				  size64, blocksize, flags, timeout);
+		free(sockfds);
+		if (monitor) {
+			struct host_info info;
+
+			info.hostname = hostname;
+			info.name = name;
+			info.port = port;
+			info.sdp = sdp;
+			info.b_unix = b_unix;
+			netlink_monitor(&info);
+		}
 		return 0;
 	}
 	/* Go daemon */
