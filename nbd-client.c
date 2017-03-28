@@ -76,6 +76,7 @@ struct host_info {
 	int sdp;
 	int b_unix;
 	int driver_id;
+	int dead_timeout;
 	struct nl_sock *socket;
 };
 
@@ -117,7 +118,7 @@ static struct nl_sock *get_nbd_socket(int *driver_id) {
 
 static void netlink_configure(int index, int *sockfds, int num_connects,
 			      u64 size64, int blocksize, uint16_t flags,
-			      int timeout) {
+			      int timeout, int dead_timeout) {
 	struct nl_sock *socket;
 	struct nlattr *sock_attr;
 	struct nl_msg *msg;
@@ -137,6 +138,7 @@ static void netlink_configure(int index, int *sockfds, int num_connects,
 	NLA_PUT_U64(msg, NBD_ATTR_BLOCK_SIZE_BYTES, blocksize);
 	NLA_PUT_U64(msg, NBD_ATTR_SERVER_FLAGS, flags);
 	NLA_PUT_U64(msg, NBD_ATTR_TIMEOUT, timeout);
+	NLA_PUT_U64(msg, NBD_ATTR_DEAD_CONN_TIMEOUT, dead_timeout);
 
 	sock_attr = nla_nest_start(msg, NBD_ATTR_SOCKETS);
 	if (!sock_attr)
@@ -202,6 +204,7 @@ static int mcast_callback(struct nl_msg *msg, void *arg)
 	int ret;
 	uint32_t index;
 	int socket;
+	int retries = 0;
 
 	if (gnlh->cmd != NBD_CMD_LINK_DEAD)
 		return NL_SKIP;
@@ -218,10 +221,20 @@ static int mcast_callback(struct nl_msg *msg, void *arg)
 	index = nla_get_u32(msg_attr[NBD_ATTR_INDEX]);
 
 	printf("disconnect on index %d\n", index);
-	if (hinfo->b_unix)
-		socket = openunix(hinfo->hostname);
-	else
-		socket = opennet(hinfo->hostname, hinfo->port, hinfo->sdp);
+	do {
+		if (hinfo->b_unix)
+			socket = openunix(hinfo->hostname);
+		else
+			socket = opennet(hinfo->hostname, hinfo->port, hinfo->sdp);
+		if (socket >= 0)
+			break;
+		sleep(1);
+	} while (retries++ < hinfo->dead_timeout);
+
+	if (socket < 0) {
+		err_nonfatal("Couldn't reconnect to the server");
+		return NL_OK;
+	}
 	negotiate(socket, &size64, &flags, hinfo->name, 0, cflags, 0);
 	out_msg = nlmsg_alloc();
 	if (!out_msg)
@@ -804,7 +817,7 @@ static void disconnect(char* device) {
 }
 
 #ifdef HAVE_NETLINK
-static const char *short_opts = "-b:c:C:d:hlLMnN:pSst:u";
+static const char *short_opts = "-b:c:C:d:D:hlLMnN:pSst:u";
 #else
 static const char *short_opts = "-b:c:C:d:hlnN:pSst:u";
 #endif
@@ -836,6 +849,7 @@ int main(int argc, char *argv[]) {
 	int netlink = 0;
 	int monitor = 0;
 	int need_disconnect = 0;
+	int dead_timeout = 0;
 	int *sockfds;
 	struct option long_options[] = {
 		{ "block-size", required_argument, NULL, 'b' },
@@ -848,6 +862,7 @@ int main(int argc, char *argv[]) {
 		{ "name", required_argument, NULL, 'N' },
 #ifdef HAVE_NETLINK
 		{ "netlink", no_argument, NULL, 'L' },
+		{ "dead-timeout", required_argument, NULL, 'D'},
 #endif
 		{ "nofork", no_argument, NULL, 'n' },
 		{ "persist", no_argument, NULL, 'p' },
@@ -933,6 +948,10 @@ int main(int argc, char *argv[]) {
 		case 'M':
 			monitor = 1;
 			netlink = 1;
+			break;
+		case 'D':
+			netlink = 1;
+			dead_timeout = (int)strtol(optarg, NULL, 0);
 			break;
 #endif
 		case 'm':
@@ -1048,7 +1067,8 @@ int main(int argc, char *argv[]) {
 				err("Invalid nbd device target\n");
 		}
 		netlink_configure(index, sockfds, num_connections,
-				  size64, blocksize, flags, timeout);
+				  size64, blocksize, flags, timeout,
+				  dead_timeout);
 		free(sockfds);
 		if (monitor) {
 			struct host_info info;
@@ -1058,6 +1078,7 @@ int main(int argc, char *argv[]) {
 			info.port = port;
 			info.sdp = sdp;
 			info.b_unix = b_unix;
+			info.dead_timeout = dead_timeout;
 			netlink_monitor(&info);
 		}
 		return 0;
