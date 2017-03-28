@@ -17,3 +17,9 @@ nbd_server_LDADD = @GLIB_LIBS@ libnbdsrv.la libcliserv.la
 nbd_trdump_LDADD = libcliserv.la
 make_integrityhuge_SOURCES = make-integrityhuge.c cliserv.h nbd.h nbd-debug.h
 EXTRA_DIST = maketr CodingStyle autogen.sh README.md
+
+if NETLINK
+bin_PROGRAMS += nbd-get-status
+nbd_get_status_SOURCES = nbd-get-status.c
+nbd_get_status_CFLAGS = @CFLAGS@
+endif

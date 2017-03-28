@@ -277,8 +277,10 @@ then
 	AC_DEFINE(HAVE_NETLINK, 1, [Define to 1 if we have netlink support])
 	CFLAGS+=" $LIBNL3_CFLAGS"
 	LIBS+=" $LIBNL3_LIBS"
+	AM_CONDITIONAL(NETLINK, true)
 else
 	AC_DEFINE(HAVE_NETLINK, 0, [Define to 1 if we have netlink support])
+	AM_CONDITIONAL(NETLINK, false)
 fi
 
 AC_HEADER_SYS_WAIT
