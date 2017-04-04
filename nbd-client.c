@@ -118,7 +118,8 @@ static struct nl_sock *get_nbd_socket(int *driver_id) {
 
 static void netlink_configure(int index, int *sockfds, int num_connects,
 			      u64 size64, int blocksize, uint16_t flags,
-			      int timeout, int dead_timeout) {
+			      u64 client_flags, int timeout,
+			      int dead_timeout) {
 	struct nl_sock *socket;
 	struct nlattr *sock_attr;
 	struct nl_msg *msg;
@@ -139,6 +140,7 @@ static void netlink_configure(int index, int *sockfds, int num_connects,
 	NLA_PUT_U64(msg, NBD_ATTR_SERVER_FLAGS, flags);
 	NLA_PUT_U64(msg, NBD_ATTR_TIMEOUT, timeout);
 	NLA_PUT_U64(msg, NBD_ATTR_DEAD_CONN_TIMEOUT, dead_timeout);
+	NLA_PUT_U64(msg, NBD_ATTR_CLIENT_FLAGS, client_flags);
 
 	sock_attr = nla_nest_start(msg, NBD_ATTR_SOCKETS);
 	if (!sock_attr)
@@ -817,7 +819,7 @@ static void disconnect(char* device) {
 }
 
 #ifdef HAVE_NETLINK
-static const char *short_opts = "-b:c:C:d:D:hlLMnN:pSst:u";
+static const char *short_opts = "-b:c:C:d:D:ehlLMnN:pSst:u";
 #else
 static const char *short_opts = "-b:c:C:d:hlnN:pSst:u";
 #endif
@@ -835,6 +837,7 @@ int main(int argc, char *argv[]) {
 	int G_GNUC_UNUSED nofork=0; // if -dNOFORK
 	pid_t main_pid;
 	u64 size64;
+	u64 client_flags = 0;
 	uint16_t flags = 0;
 	int c;
 	int nonspecial=0;
@@ -863,6 +866,7 @@ int main(int argc, char *argv[]) {
 #ifdef HAVE_NETLINK
 		{ "netlink", no_argument, NULL, 'L' },
 		{ "dead-timeout", required_argument, NULL, 'D'},
+		{ "destroy", no_argument, NULL, 'e'},
 #endif
 		{ "nofork", no_argument, NULL, 'n' },
 		{ "persist", no_argument, NULL, 'p' },
@@ -952,6 +956,9 @@ int main(int argc, char *argv[]) {
 		case 'D':
 			netlink = 1;
 			dead_timeout = (int)strtol(optarg, NULL, 0);
+			break;
+		case 'e':
+			client_flags |= NBD_CFLAG_DESTROY_ON_DISCONNECT;
 			break;
 #endif
 		case 'm':
@@ -1067,8 +1074,8 @@ int main(int argc, char *argv[]) {
 				err("Invalid nbd device target\n");
 		}
 		netlink_configure(index, sockfds, num_connections,
-				  size64, blocksize, flags, timeout,
-				  dead_timeout);
+				  size64, blocksize, flags, client_flags,
+				  timeout, dead_timeout);
 		free(sockfds);
 		if (monitor) {
 			struct host_info info;

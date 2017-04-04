@@ -41,7 +41,7 @@ enum {
 #define NBD_CMD_SHIFT (16)
 #define NBD_CMD_FLAG_FUA ((1 << 0) << NBD_CMD_SHIFT)
 
-/* values for flags field */
+/* values for flags field, these are server interaction specific. */
 #define NBD_FLAG_HAS_FLAGS	(1 << 0)	/* Flags are there */
 #define NBD_FLAG_READ_ONLY	(1 << 1)	/* Device is read-only */
 #define NBD_FLAG_SEND_FLUSH	(1 << 2)	/* Send FLUSH */
@@ -49,6 +49,10 @@ enum {
 #define NBD_FLAG_ROTATIONAL	(1 << 4)	/* Use elevator algorithm - rotational media */
 #define NBD_FLAG_SEND_TRIM	(1 << 5)	/* Send TRIM (discard) */
 #define NBD_FLAG_CAN_MULTI_CONN	(1 << 8)	/* Server supports multiple connections per export. */
+
+/* These are client behavior specific flags. */
+#define NBD_CFLAG_DESTROY_ON_DISCONNECT	(1 << 0) /* delete the nbd device on
+						    disconnect. */
 
 #define nbd_cmd(req) ((req)->cmd[0])
 
